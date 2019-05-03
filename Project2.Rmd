@@ -1,0 +1,1196 @@
+---
+title: "Project2"
+output: pdf_document
+author: "Yijun Long & Alice Meng"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(scales)
+library(MASS)
+library(ROCR)
+library(mvtnorm)
+library(caret)
+library(plyr)
+library(ModelMetrics)
+library(caretEnsemble)
+library(glmnet)
+library(e1071)
+library(pROC)
+```
+**1. Data Collection and Exploration**
+(a)
+  “Daytime Arctic Cloud Detection Based on Multi-Angle Satellite Data” is a study on operational cloud detection algorithms applied in the polar regions. Cloud detection in the Arctic is challenging because of the similar remote sensing characteristics of clouds and ice- and snow-covered surfaces. The goal of this study is to derive, train, and compare algorithms that can efficiently process massive imagery data without requiring human intervention. The data used in the study was collected by NASA's Multi-angle Imaging Spectroradiometer (MISR) imagery, which are electromagnetic radiation measurements using nine cameras at nine different angles, each of which views the Earth in four spectral bands (blue, green, red, and near-infrared). Each MISR pixel encompasses a 275m*275m region, yielding tremendous amounts of data. The nine view zenith angles of the cameras are 70.5" (Df), 60.0" (Cf), 45.6" (Bf), and 26.1" (Af) in the forward direction; 0.0" (An) in the nadir direction and 26.1" (Aa), 45.6" (Ba), 60.0" (Ca), and 70.5" (Da) in the aft direction. (The “f” in the letter designation of the cameras represents the “forward” direction, and the “a” represents the “aft” direction.) Besides the features provided by the nine angles, after substantial exploratory data analysis, three other physically useful features are applied in the analysis, which are CORR, an average linear correlation of radiation measurements at different view angles, SD, the standard deviation of MISR nadir camera pixel values across a  scene, and NDAI, the ratio between the difference and sum of the mean radiation measurements from the first and fifth angle associated with a particular pixel region. To evaluate the performance of proposed methods, an expert hand-labeled the data to either high confidence cloudy, high confidence clear, or unlabeled. Thus, the expert label variable is included in the dataset used to better train the model. In the end of the paper, the researchers concluded that CORR, SD, and NDAI contains sufficient information to separate clouds from ice- and snow-covered surfaces. Moreover, the ELCM algorithm, which combines classification and clustering frameworks, provides better spatial coverage and is more computationally efficient. The work shown in the paper is significant because, when tackling data-related problems, it is very important for the researchers to choose appropriate statistical methods to the data on a case-by-case basis. In addition, the study demonstrates the power of statistical thinking, and the ability of statistics to contribute solutions to modern scientific problems. 
+
+```{r}
+#load data sets
+image1 <- read.table('image1.txt', header = F)
+image2 <- read.table('image2.txt', header = F)
+image3 <- read.table('image3.txt', header = F)
+```
+
+```{r}
+# Change column names
+column.labels <- c('y','x','label','NDAI','SD','CORR','DF','CF','BF','AF','AN')
+names(image1) <- column.labels
+names(image2) <- column.labels
+names(image3) <- column.labels
+
+# Add a column with image number respectively to each data table
+image1 <- mutate(image1, Image = 1)
+image2 <- mutate(image2, Image = 2)
+image3 <- mutate(image3, Image = 3)
+
+# Combine the three data tables into one 
+imagesall <- rbind(image1, image2, image3)
+```
+
+(b)
+```{r}
+#find proportion of each label
+n_total<- nrow(imagesall)
+n_not<-imagesall%>% filter(label==-1) %>% nrow
+prop_not<-percent(n_not/n_total)
+
+n_unlabeled<-imagesall%>% filter(label==0) %>% nrow
+prop_unlabeled<-percent(n_unlabeled/n_total)
+
+n_cloud<-imagesall%>% filter(label==1) %>% nrow
+prop_cloud<-percent(n_cloud/n_total)
+
+c(prop_not, prop_unlabeled, prop_cloud)
+```
+
+```{r}
+# Plot images with their expert labels
+expertlabels_plot <- ggplot(imagesall, aes(x = x, y = y, color = factor(label))) + 
+  geom_point() + facet_wrap(~ Image) +
+  ggtitle('Maps with Expert Labels')+ 
+  scale_color_discrete(name = '',breaks = c("-1", "0", "1"),
+                       labels = c("Clear", "Unknown", "Cloudy"))
+expertlabels_plot
+```
+
+Comments: Among the three image data sets, 36.8% of the pixels are labeled as not cloudy, 23.4% are labeled as cloudy, and 39.8% are unlabeled. From the three maps we plot, we can observe a similar pattern. The reason lies in the fact that they are three images of the same location, and so the samples are assumed as non identically independent distributed(iid). 
+
+(c)
+
+(i) pairwise relationship between the features 
+```{r}
+#since we only care about the relationship between the two classes(cloud, no cloud) and the features, for now we remove the unlabeled observations
+labeled.imagesall <- filter(imagesall, label!=0)
+```
+
+```{r}
+#CORR & NDAI
+corr.ndai.eda <- ggplot(labeled.imagesall) + 
+  geom_jitter(aes(x=CORR, y=NDAI, 
+                  group=factor(label), colour=factor(label),
+                  alpha=0.2)) +
+  facet_wrap(~ Image) +
+  ggtitle("CORR vs. NDAI") +
+  theme(legend.position="none", aspect.ratio=1)
+corr.ndai.eda
+```
+```{r}
+#CORR & SD
+corr.sd.eda <- ggplot(labeled.imagesall) + 
+  geom_jitter(aes(x=CORR, y=SD, 
+                  group=factor(label), colour=factor(label),
+                  alpha=0.5)) +
+   facet_wrap(~ Image) +
+  ggtitle("CORR vs. SD") +
+  theme(legend.position="none", aspect.ratio=1)
+corr.sd.eda
+```
+
+
+```{r}
+#NDAI & SD
+ndai.sd.eda <- ggplot(labeled.imagesall) + 
+  geom_jitter(aes(x=NDAI, y=SD, 
+                  group=factor(label), colour=factor(label),
+                  alpha=0.5)) +
+   facet_wrap(~ Image) +
+  ggtitle("NDAI vs. SD") +
+  theme(legend.position="none", aspect.ratio=1)
+ndai.sd.eda
+```
+
+```{r}
+#NDAI & AN
+ndai.an.eda <- ggplot(labeled.imagesall) + 
+  geom_jitter(aes(x=NDAI, y=AN, 
+                  group=factor(label), colour=factor(label),
+                  alpha=0.5)) +
+   facet_wrap(~ Image) +
+  ggtitle("NDAI vs. AN") +
+  theme(legend.position="none", aspect.ratio=1)
+ndai.an.eda
+```
+
+```{r}
+#NDAI & AN
+#NDAI & the other radiance relationships are similar to this one
+ndai.an.eda <- ggplot(labeled.imagesall) + 
+  geom_jitter(aes(x=NDAI, y=AN, 
+                  group=factor(label), colour=factor(label),
+                  alpha=0.5)) +
+   facet_wrap(~ Image) +
+  ggtitle("NDAI vs. AN") +
+  theme(legend.position="none", aspect.ratio=1)
+ndai.an.eda
+```
+```{r}
+#CORR & AN
+corr.an.eda <- ggplot(labeled.imagesall) + 
+  geom_jitter(aes(x=CORR, y=AN, 
+                  group=factor(label), colour=factor(label),
+                  alpha=0.5)) +
+   facet_wrap(~ Image) +
+  ggtitle("CORR vs. AN") +
+  theme(legend.position="none", aspect.ratio=1)
+corr.an.eda
+```
+
+```{r}
+#SD & AN
+sd.an.eda <- ggplot(labeled.imagesall) + 
+  geom_jitter(aes(x=SD, y=AN, 
+                  group=factor(label), colour=factor(label),
+                  alpha=0.5)) +
+   facet_wrap(~ Image) +
+  ggtitle("SD vs. AN") +
+  theme(legend.position="none", aspect.ratio=1)
+sd.an.eda
+```
+
+(ii)
+```{r}
+# AN & labels
+ggplot(imagesall) + geom_density(aes(x = AN, group = factor(label), 
+                                            fill = factor(label)), alpha = 0.5) +facet_wrap(~ Image) 
+```
+
+```{r}
+# AF & labels
+ggplot(imagesall) + geom_density(aes(x = AF, group = factor(label), 
+                                            fill = factor(label)), alpha = 0.5) +facet_wrap(~ Image)
+```
+
+```{r}
+# BF & labels
+ggplot(imagesall) + geom_density(aes(x = BF, group = factor(label), 
+                                            fill = factor(label)), alpha = 0.5) +facet_wrap(~ Image)
+```
+
+```{r}
+# CF & labels
+ggplot(imagesall) + geom_density(aes(x = CF, group = factor(label), 
+                                            fill = factor(label)), alpha = 0.5) +facet_wrap(~ Image)
+```
+
+```{r}
+# DF & labels
+ggplot(imagesall) + geom_density(aes(x = DF, group = factor(label), 
+                                            fill = factor(label)), alpha = 0.5) +facet_wrap(~ Image)
+```
+
+
+```{r}
+# NDAI & labels
+ggplot(imagesall) + geom_density(aes(x = NDAI, group = factor(label), 
+                                            fill = factor(label)), alpha = 0.5) +facet_wrap(~ Image)
+```
+
+
+
+```{r}
+# SD & labels
+ggplot(imagesall) + geom_density(aes(x = SD, group = factor(label), 
+                                            fill = factor(label)), alpha = 0.5) +facet_wrap(~ Image)
+```
+
+```{r}
+# CORR & labels
+ggplot(imagesall) + geom_density(aes(x = CORR, group = factor(label), 
+                                            fill = factor(label)), alpha = 0.5) +facet_wrap(~ Image)
+```
+
+Comments: Since we only care about the relationship between the two classes(cloud, no cloud) and the features, for now we remove the unlabeled observations. From the pairwise plots between the variables NDAI vs. CORR, CORR vs. SD, SD vs. NDAI, we see patterns, which indicate whether there are cloud with specific shapes. We also plotted NDAI vs the radiance variables (e.g AN) and noticed that there are merely cloud trends that are not seperatable. Then we plotted the conditional densities of the variables and we found that they all somehow help predict if there are clouds. We can conclude that higher NDAI indicates higher likelihood of the precence of cloud. It is clear that pixels labelled as clouds have higher SD values. Also, higher CORR suggests higher likelihood of the precence of cloud, though not as strongly as NDAI. From the density plots of the radiance features, we see similar distributions with different expert labels for different radiance. For instance, when there is no cloud(expert label == -1), the distributions of AN have peaks around 200.
+
+**2. Preparation**
+(a) 
+  For our data, the rows are not i.i.d. As such we have to be more careful in choosing the train set, test set, and cross validation sets. We only have three images, one way to create more observations is to divide each image into k by k smaller images. Doing this, each block can be thought of as a separate image, and we have $3k^2$ images. These newly created images are not totally independent; still, dividing three images into small images should help us in building a more stable model on new images. In our data, we choose k = 3, as such there are 27 small images. We choose 15 blocks at random to use as train, and the remaining as test. By splitting this way, we take into account that the data is not iid, unlike random split, which does not take into account of non-iid data. 
+  Another splitting method is to split each image into 2 by 2 smaller images by the mean of x and y. Doing this, each block can be thought of as a separate image, and we have 12 images. Then we choose 6 blocks at random to use as train, 3 blocks as validation set, the remaining 3 as test set. This splitting method takes into account the distributions of x and y and the fact that the data is not iid. 
+
+```{r}
+#write a split funciton to split the data
+data_split_func <- function(image, xn, yn){
+  df <- replicate(xn*yn, data.frame())
+  xmin <- min(image$x)
+  ymin <- min(image$y)
+  xmax <- max(image$x)
+  ymax <- max(image$y)
+  xstep.size <- ceiling((xmax-xmin)/xn)
+  ystep.size <- ceiling((ymax-ymin)/yn)
+  
+  for(i in 1:xn){
+    for(j in 1:yn){
+      n <- (i-1)*yn + j 
+      df[[n]] <- filter(image, 
+                               x >= xmin + (i-1)*xstep.size, 
+                               x < xmin + i*xstep.size,
+                               y >= ymin + (j-1)*ystep.size, 
+                               y < ymin + j*ystep.size)
+    }
+  }
+  return(df)
+}
+images.27 <- c(data_split_func(image1,3,3),
+                data_split_func(image2,3,3),
+                data_split_func(image3,3,3))
+
+images.27.split<-split(images.27[sample(length(images.27))], rep(1:3, c(15,7,5)))
+train.data.list<-images.27.split[1]
+val.data.list<-images.27.split[2]
+test.data.list<-images.27.split[3]
+
+
+train.data<-rbind(train.data.list[1][[1]][[1]],train.data.list[1][[1]][[2]],train.data.list[1][[1]][[3]],
+                  train.data.list[1][[1]][[4]],train.data.list[1][[1]][[5]],train.data.list[1][[1]][[6]],
+                  train.data.list[1][[1]][[7]],train.data.list[1][[1]][[8]],train.data.list[1][[1]][[9]],
+                  train.data.list[1][[1]][[10]],train.data.list[1][[1]][[11]],train.data.list[1][[1]][[12]],
+                  train.data.list[1][[1]][[13]],train.data.list[1][[1]][[14]],train.data.list[1][[1]][[15]])
+
+val.data<-rbind(val.data.list[1][[1]][[1]],val.data.list[1][[1]][[2]],val.data.list[1][[1]][[3]],
+                  val.data.list[1][[1]][[4]],val.data.list[1][[1]][[5]],val.data.list[1][[1]][[6]],
+                  val.data.list[1][[1]][[7]])
+
+test.data<-rbind(test.data.list[1][[1]][[1]],test.data.list[1][[1]][[2]],test.data.list[1][[1]][[3]],
+                  test.data.list[1][[1]][[4]],test.data.list[1][[1]][[5]])
+
+```
+
+
+```{r}
+#Mehtod 2: split each image into four subsets
+image1$assignment <- 1 + (image1$x < mean(image1$x) & 
+                            image1$y > mean(image1$y)) + 
+  3*(image1$y < mean(image1$y) & image1$x > mean(image1$x)) + 
+  2*((image1$x > mean(image1$x)) & (image1$y > mean(image1$y)))
+
+image2$assignment <- 5 + (image2$x < mean(image2$x) & 
+                            image2$y > mean(image2$y)) + 
+  3*(image2$y < mean(image2$y) & image2$x > mean(image2$x)) + 
+  2*((image2$x > mean(image2$x)) & (image2$y > mean(image2$y)))
+
+image3$assignment <- 9 + (image3$x < mean(image3$x) & 
+                            image3$y > mean(image3$y)) + 
+  3*(image3$y < mean(image3$y) & image3$x > mean(image3$x)) + 
+  2*((image3$x > mean(image3$x)) & (image3$y > mean(image3$y)))
+
+images.12<-list(image1[image1$assignment == 1, ],image1[image1$assignment == 2, ],image1[image1$assignment == 3, ],image1[image1$assignment == 4, ],image2[image2$assignment == 5, ],image2[image2$assignment == 6, ],image2[image2$assignment == 7, ],image2[image2$assignment == 8, ],image3[image3$assignment == 9, ],image3[image3$assignment == 10, ],image3[image3$assignment == 11, ],image3[image3$assignment == 12, ])
+
+
+images.12.split<-split(images.12[sample(length(images.12))], rep(1:3, c(6,3,3)))
+train.data.list2<-images.12.split[1]
+val.data.list2<-images.12.split[2]
+test.data.list2<-images.12.split[3]
+
+train.data2<-rbind(train.data.list2[1][[1]][[1]],train.data.list2[1][[1]][[2]],train.data.list2[1][[1]][[3]],
+                  train.data.list2[1][[1]][[4]],train.data.list2[1][[1]][[5]],train.data.list2[1][[1]][[6]])
+
+val.data2<-rbind(val.data.list2[1][[1]][[1]],val.data.list2[1][[1]][[2]],val.data.list2[1][[1]][[3]])
+
+test.data2<-rbind(test.data.list2[1][[1]][[1]],test.data.list2[1][[1]][[2]],test.data.list2[1][[1]][[3]])
+```
+
+
+(b)
+The accuracy of a trivial classifier which sets all labels to -1 on the validation set and on the test set is approximately36.8%, which serves as a baseline to ensure that the classification problem is not trivial. 
+```{r}
+percent(nrow(val.data[val.data$label == -1,])/nrow(val.data))
+percent(nrow(test.data[test.data$label == -1,])/nrow(test.data))
+```
+
+(c)
+  Based on the conditional densities and the pairwise correlation plots, we selected CORR, NDAI, and SD as the three predictors because they predict the presence of clouds better than the radiances of angles. The conditional densities generally exhibit less overlap in the two distributions than the conditional densities of the radiances.
+We see that NDAI has fairly better separation between cloudy and clear in all three plots, which is confrmed in our modeling sections later. Also, it is clear that cloudy pixels have higher SD values. Hence, we expect the two features together can help determine whether a pixel with high NDAI should be labelled as cloudy by using the SD feature. Finally, CORR values seem to be a good separator for image 2, but less so for image 1. The different distributions of CORR values for these images suggest us to cross validate our models across images.
+
+(d)
+```{r}
+CVgeneric <-
+  function (classifier, trainingfeatures, traininglabels,  lossfunc, K, seed=123) {
+    
+    #`trainingfeatures` is a data frame with one feature values in each column
+    features<-names(trainingfeatures) #a vector of names of training features
+    model<- as.formula(paste("label~", paste(features, collapse='+')))
+    
+    data<-cbind(trainingfeatures, label=traininglabels)
+    n <- nrow(trainingfeatures)
+    set.seed(seed)
+    #partition the data into K subsets
+    f <- ceiling(n/K)
+    s <- sample(rep(1:K, f), n)  
+    #generate indices 1:K and sample n of them  
+    
+    # K fold cross-validated error
+    CV=NULL
+    
+    for (i in 1:K) { 
+      test.index <- seq_len(n)[(s == i)] #test data
+      train.index <- seq_len(n)[(s != i)] #training data
+      
+      #model with training data
+      fit=classifier(model,  data=data[train.index,])
+      #actual test set y
+      actual.labels <- data[test.index, "label"]
+      #predicted test set y
+      predicted.labels=predict(fit, data[test.index,])$class
+      
+      #actual - predicted on test data
+      error= lossfunc(actual.labels,predicted.labels)
+      accuracy = 1-error
+      #error rates 
+      CV=c(CV,accuracy)
+    }
+    #Output
+    return(CV)
+  }
+
+```
+
+
+
+
+
+
+**3. Modeling**
+(a)
+Models:
+
+In order to perform AUC function, we need to make variable label binary. That is, we need to remove the unlabeled observations first. 
+
+Some of the models are more of an optimization procedures than a statistical model, namely Support Vector Machine which really has no assumption. We instead check the model assumption for the probabilistic models. For Linear Regression, it is clear that the assumption will not be met for binary responses. However, later we will see  a Least Square method can still perform very well. 
+
+Then we check the model assumption for Logistic Regression. The log-odd should be linear in each of the inputs. 
+
+```{r}
+train.data <- filter(train.data, label != 0)
+val.data<-filter(val.data, label != 0)
+test.data<-filter(test.data, label != 0)
+
+train.val.data<-rbind(train.data,val.data)
+
+train.data2 <- filter(train.data2, label != 0)
+val.data2<-filter(val.data2, label != 0)
+test.data2<-filter(test.data2, label != 0)
+
+train.val.data2<-rbind(train.data2,val.data2)
+```
+
+```{r}
+trainf<-train.val.data[,4:11]
+trainl<-train.val.data[,3]
+
+trainf2<-train.val.data2[,4:11]
+trainl2<-train.val.data2[,3]
+
+```
+
+```{r,echo=FALSE, message = FALSE}
+logitFun = function(p)
+{
+  log(p/(1-p))
+}
+
+plotLogoddTruthPreds = function(truth, preds, m = 100, .xlab = NULL)
+{
+  # m is the number of points to evaluate the plot at
+  if (length(truth) != length(preds))
+  {
+    warning("Length of vector truth and probs must be equal")
+  }
+
+  ordered.truth = truth[order(preds)]
+  ordered.preds = preds[order(preds)]
+  n = length(truth)
+  interval.size = floor(n/m)
+  idx = seq(1, n, by = interval.size)
+  n.idx = length(idx)
+  # Num of positive in each interval divided by interval length
+  prob.truth = diff(cumsum(ordered.truth)[idx])/interval.size
+  logodd.truth = logitFun(prob.truth)
+  logodd.preds = diff(cumsum(ordered.preds)[idx])/interval.size
+  plot(logodd.preds, logodd.truth, xlab = .xlab)
+}
+```
+
+```{r}
+train.val.data.logit <- mutate(train.val.data, label=(label+1)/2)
+test.data.logit<-mutate(test.data, label=(label+1)/2)
+
+logreg.fit = glm(label ~ NDAI + SD + CORR + DF + CF + BF + AF + AN,
+                      data = train.val.data.logit, family = binomial(link = "logit"))
+label.hat2_assum = predict(logreg.fit, train.val.data.logit, type = "link")
+
+par(mfrow=c(2,2))
+plotLogoddTruthPreds(train.val.data.logit$label, train.val.data.logit$NDAI, .xlab="NDAI")
+plotLogoddTruthPreds(train.val.data.logit$label, train.val.data.logit$SD, .xlab="SD")
+plotLogoddTruthPreds(train.val.data.logit$label, train.val.data.logit$CORR, .xlab = "CORR")
+plotLogoddTruthPreds(train.val.data.logit$label, label.hat2_assum, .xlab = "Yhat")
+```
+
+Looking at the plots of log-odd versus each predictor, we see that the plot of log-odd with respect to NDAI, SD, and CORR are not linear. So we might want to include quadratic terms. This also explains why we see a higher performance in QDA.
+
+For QDA, we need the predictor variables X  to be drawn from a multivariate Gaussian distribution. Looking at the marginal Q-Q plot with respect to the normal quantiles, we see that none of the inputs have a linear Q-Q plot. So again the assumptions are not met. 
+
+```{r,echo=FALSE}
+par(mfrow=c(2,2))
+qqnorm(train.val.data$NDAI, ylab = "NDAI")
+qqnorm(train.val.data$SD, ylab = "SD")
+qqnorm(train.val.data$CORR, ylab = "CORR")
+qqnorm(train.val.data$AN, ylab = "AN")
+```
+
+
+1. Linear Regression
+
+```{r}
+meanError = function(label, label.hat)
+{
+  # The penalty function is defined as: If truth is 1:
+  # predict 0 has penalty 0.5
+  # predict -1 has penalty 1
+  # predict 1 correctly has no penalty.
+  t = table(label, label.hat)
+  (0.5*(t[1,2]+t[2,1]+t[2,3]+t[3,2])+t[1,3]+t[3,1])/sum(t)
+}
+
+cutOff = function(label, thres = 0.5, k = 2)
+{
+  # Given a number x, if x > thres, return 1,
+  # if x < -thres, return -1.
+  # if - thres <= x <= thres return 0
+  # where label > 0.5, set to 1, the rest 0
+  x = (label > thres) + 0.0
+  # where label < -0.5 set to -1 instead
+  if (k == 3) x[label < -thres] = -1
+  x
+}
+
+cutOffGridSearch = function(label, label.hat, method = accuracy)
+{
+  # This function perform a grid search to find the best cutoff 
+  # value in converting continuous predicted label into discrete
+  # Note that if method is "accuracy", extreme must be max, 
+  # If method is "meanError", extreme must be min. 
+  if (identical(method, accuracy)) 
+  {
+    extreme = max
+  } else if (identical(method, meanError))
+  {
+    extreme = min
+  } else
+  {
+    warning("Method must be one of: accuracy, meanError")
+  }
+  thres = seq(0.01, 0.99, by = 0.01)
+  s = lapply(thres, 
+             function(x) method(label, cutOff(label.hat, x)))
+  s = unlist(s)
+  thres[s == extreme(s)][1]
+}
+
+accuracy = function(label, label.hat)
+{
+  # Return the percentage of time predicting correctly
+  # over total number of prediction.
+  t = table(label, label.hat)
+  sum(diag(t))/sum(t)
+}
+```
+
+```{r}
+#split 1
+linreg.fit = lm(label ~ NDAI + SD + CORR + DF + CF + BF   + AF + AN, 
+                data = train.val.data)
+
+label.hat = predict.lm(linreg.fit, test.data)
+
+### Measuring Linear Regression Performance
+auc(test.data$label, label.hat)
+accuracy(cutOff(label.hat, 0.5), test.data$label)
+```
+
+```{r}
+# ROC curve
+r<-roc(test.data$label, label.hat)
+plot.roc(r, print.thres="best", print.auc = TRUE)
+```
+
+
+```{r}
+#split 2
+linreg.fit_2 = lm(label ~ NDAI + SD + CORR + DF + CF + BF   + AF + AN, 
+                data = train.val.data2)
+
+label.hat_2 = predict.lm(linreg.fit, test.data2)
+
+### Measuring Linear Regression Performance
+auc(test.data2$label, label.hat_2)
+accuracy(cutOff(label.hat_2, 0.5), test.data2$label)
+```
+
+```{r}
+CVgeneric_lm <-
+  function (classifier, trainingfeatures, traininglabels,  K, seed=123) {
+    
+    #`trainingfeatures` is a data frame with one feature values in each column
+    features<-names(trainingfeatures) #a vector of names of training features
+    model<- as.formula(paste("label~", paste(features, collapse='+')))
+    
+    data<-cbind(trainingfeatures, label=traininglabels)
+    n <- nrow(trainingfeatures)
+    set.seed(seed)
+    #partition the data into K subsets
+    f <- ceiling(n/K)
+    s <- sample(rep(1:K, f), n)  
+    #generate indices 1:K and sample n of them  
+    
+    # K fold cross-validated error
+    CV=NULL
+    
+    for (i in 1:K) { 
+      test.index <- seq_len(n)[(s == i)] #test data
+      train.index <- seq_len(n)[(s != i)] #training data
+      
+      #model with training data
+      fit=classifier(model,  data=data[train.index,])
+      #actual test set y
+      actual.labels <- data[test.index, "label"]
+      #predicted test set y
+      predicted.labels=round(predict(fit, data[test.index,]))
+      
+      #actual - predicted on test data
+      error= mean(actual.labels!=predicted.labels)
+      accuracy = 1-error
+      #error rates 
+      CV=c(CV,accuracy)
+    }
+    #Output
+    return(CV)
+  }
+
+```
+
+```{r}
+#CV accuracy split1
+CVgeneric_lm (lm, trainf,trainl,K=10, seed=123)
+```
+
+```{r}
+#CV accuracy split2
+CVgeneric_lm (lm, trainf2,trainl2,K=10, seed=123)
+```
+
+
+2. Logistic Regression
+
+```{r}
+#split 1
+
+logreg.fit = glm(label ~ NDAI + SD + CORR + DF + CF + BF + AF + AN,
+                      data = train.val.data.logit, family = binomial(link = "logit"))
+
+label.hat2 = predict(logreg.fit, test.data.logit, type = "response")
+
+auc(test.data.logit$label, label.hat2)
+accuracy(cutOff(label.hat2), test.data.logit$label)
+cutoff.logit<-cutOffGridSearch(test.data.logit$label, label.hat2, method = accuracy)
+```
+```{r}
+# ROC curve
+r2<-roc(test.data.logit$label, label.hat2)
+plot.roc(r2, print.thres="best", print.auc = TRUE)
+```
+
+
+```{r}
+#CV accuracy split1
+trainf.logit<-train.val.data.logit[,4:11]
+trainl.logit<-train.val.data.logit[,3]
+
+CVgeneric_lm (glm, trainf.logit,trainl.logit,K=10, seed=123)
+```
+
+
+
+
+
+```{r}
+#split 2
+train.val.data.logit2 <- mutate(train.val.data2, label=(label+1)/2)
+test.data.logit2<-mutate(test.data2, label=(label+1)/2)
+
+logreg.fit2 = glm(label ~ NDAI + SD + CORR + DF + CF + BF + AF + AN,
+                      data = train.val.data.logit2, family = binomial(link = "logit"))
+
+label.hat_22 = predict(logreg.fit2, test.data.logit2, type = "response")
+
+auc(test.data.logit2$label, label.hat_22)
+accuracy(cutOff(label.hat_22), test.data.logit2$label)
+
+```
+
+```{r}
+#CV accuracy split2
+trainf.logit2<-train.val.data.logit2[,4:11]
+trainl.logit2<-train.val.data.logit2[,3]
+CVgeneric_lm (glm, trainf.logit2,trainl.logit2,K=10, seed=123)
+```
+
+3. GLMNET
+```{r}
+getFold = function(blockid)
+{
+  # This function is only used in cross validation cv.glmnet
+  # It renames a vector of integer so that values are drawed 
+  # from 1 to n.
+  # E.g. 2,2,3,6,6,6,6,100,3,3,2 -> 
+  #      1,1,2,3,3,3,3,4,2,2,1
+  res = rep(0, length(blockid))
+  l = unique(blockid)
+  for (i in 1:length(l))
+  {
+    res[blockid == l[i]] = i
+  }
+  res
+}
+```
+
+```{r}
+#split 1
+ld = c(1,0.5,0.2,0.1,0.05,0.02,0.01,0.005,0.002,0.001,0.0005,0.0002,0.0001,
+       5e-5, 2e-5, 1e-5, 5e-6, 2e-6, 1e-6)
+glmnet.fit = glmnet(as.matrix(train.val.data[,4:11]), as.numeric(train.val.data[,3]), 
+                    family = "binomial", standardize = TRUE, 
+                    intercept = TRUE, lambda = ld)
+# label.hat3 is a matrix, each column is one possible yhat, for a 
+# corresponding lambda - regularization parameter. 100 columns in total
+label.hat3 = predict(glmnet.fit, as.matrix(test.data[,4:11]), type = "response")
+sapply(1:length(ld), function(i) auc(test.data$label, label.hat3[,i]))
+sapply(1:length(ld), function(i) accuracy(test.data$label, cutOff(label.hat3)[,i]))
+```
+
+```{r}
+# ROC curve
+r3<-roc(test.data$label, label.hat3[,length(ld)])
+plot.roc(r3, print.thres="best", print.auc = TRUE)
+```
+
+
+```{r}
+# 3.2. CVGLMNET
+cvglm.fit = cv.glmnet(as.matrix(train.val.data[,4:11]), 
+                      as.numeric(train.val.data[,3]), family = "binomial",
+                      standardize = FALSE, intercept = FALSE,
+                      type.measure = "auc",
+                      parallel = FALSE)
+label.hat32 = predict(cvglm.fit, as.matrix(test.data[,4:11]), type = "response")
+auc(test.data$label, label.hat32)
+accuracy(cutOff(label.hat32), test.data$label)
+
+```
+
+
+
+```{r}
+#split 2
+glmnet.fit2 = glmnet(as.matrix(train.val.data2[,4:11]), as.numeric(train.val.data2[,3]), 
+                    family = "binomial", standardize = TRUE, 
+                    intercept = TRUE, lambda = ld)
+# label.hat3 is a matrix, each column is one possible yhat, for a 
+# corresponding lambda - regularization parameter. 100 columns in total
+label.hat3_2 = predict(glmnet.fit2, as.matrix(test.data2[,4:11]), type = "response")
+sapply(1:length(ld), function(i) auc(test.data2$label, label.hat3_2[,i]))
+sapply(1:length(ld), function(i) accuracy(test.data2$label, cutOff(label.hat3_2)[,i]))
+```
+
+
+4. Quadratic Discriminant Analysis
+
+```{r}
+#split 1
+qda.fit = qda(label ~ NDAI + SD + CORR + DF + CF + BF + AF + AN,
+                 data = train.val.data)
+
+label.hat4 = predict(qda.fit, test.data)
+auc(test.data$label, as.numeric(label.hat4[[1]]))
+accuracy(test.data$label, as.numeric(label.hat4[[1]]))
+```
+
+```{r}
+# ROC curve
+r4<-roc(test.data$label, as.numeric(label.hat4[[1]]))
+plot.roc(r4, print.thres="best", print.auc = TRUE)
+```
+
+
+```{r}
+CVgeneric_qda <-
+  function (classifier, trainingfeatures, traininglabels,  K, seed=123) {
+    
+    #`trainingfeatures` is a data frame with one feature values in each column
+    features<-names(trainingfeatures) #a vector of names of training features
+    model<- as.formula(paste("label~", paste(features, collapse='+')))
+    
+    data<-cbind(trainingfeatures, label=traininglabels)
+    n <- nrow(trainingfeatures)
+    set.seed(seed)
+    #partition the data into K subsets
+    f <- ceiling(n/K)
+    s <- sample(rep(1:K, f), n)  
+    #generate indices 1:K and sample n of them  
+    
+    # K fold cross-validated error
+    CV=NULL
+    
+    for (i in 1:K) { 
+      test.index <- seq_len(n)[(s == i)] #test data
+      train.index <- seq_len(n)[(s != i)] #training data
+      
+      #model with training data
+      fit=classifier(model,  data=data[train.index,])
+      #actual test set y
+      actual.labels <- data[test.index, "label"]
+      #predicted test set y
+      predicted.labels=predict(fit, data[test.index,])$class
+      
+      #actual - predicted on test data
+      error= mean(actual.labels!=predicted.labels)
+      accuracy = 1-error
+      #error rates 
+      CV=c(CV,accuracy)
+    }
+    #Output
+    return(CV)
+  }
+
+```
+
+```{r}
+#CV accuracy
+trainf<-train.val.data[,4:11]
+trainl<-train.val.data[,3]
+CVgeneric_qda (qda, trainf,trainl,K=10, seed=123)
+```
+
+
+```{r}
+#split2
+qda.fit2 = qda(label ~ NDAI + SD + CORR + DF + CF + BF + AF + AN,
+                 data = train.val.data2)
+
+label.hat4_2 = predict(qda.fit2, test.data2)
+auc(test.data2$label, as.numeric(label.hat4_2$class))
+accuracy(test.data2$label, label.hat4_2$class)
+
+```
+
+
+```{r}
+#CV accuracy
+trainf2<-train.val.data2[,4:11]
+trainl2<-train.val.data2[,3]
+CVgeneric_qda (qda, trainf2,trainl2,K=10, seed=123)
+```
+
+
+5. Random Forest
+
+```{r}
+library(randomForest)
+#split 1
+forest.fit = randomForest(factor(label) ~ NDAI + SD + CORR + DF +
+                            CF + BF + AF + AN,
+                          data = train.val.data,
+                          ntree = 160)
+
+label.hat5 = predict(forest.fit, test.data, type = "prob")
+random.forest.yhat = label.hat5[,2]
+save(random.forest.yhat, file = "random.forest.yhat.RData")
+auc(test.data$label, label.hat5[,2])
+accuracy( cutOff(label.hat5[,2]),test.data$label)
+```
+
+
+```{r}
+# ROC curve
+r5<-roc(test.data$label,  label.hat5[,2])
+plot.roc(r5, print.thres="best", print.auc = TRUE)
+```
+
+
+```{r}
+library(randomForest)
+#split 1    
+forest.fit = randomForest(factor(label) ~ NDAI + SD + CORR + DF +
+                            CF + BF + AF + AN,
+                          data = train.val.data,
+                          ntree = 160)
+
+label.hat5 = predict(forest.fit, test.data, type = "prob")
+random.forest.yhat = label.hat5[,2]
+save(random.forest.yhat, file = "random.forest.yhat.RData")
+auc(test.data$label, label.hat5[,2])
+accuracy( cutOff(label.hat5[,2]),test.data$label)
+```
+
+```{r}
+CVgeneric_rf <-
+  function (classifier, trainingfeatures, traininglabels,  K, seed=123) {
+    
+    #`trainingfeatures` is a data frame with one feature values in each column
+    features<-names(trainingfeatures) #a vector of names of training features
+    model<- as.formula(paste("label~", paste(features, collapse='+')))
+    
+    data<-cbind(trainingfeatures, label=traininglabels)
+    n <- nrow(trainingfeatures)
+    set.seed(seed)
+    #partition the data into K subsets
+    f <- ceiling(n/K)
+    s <- sample(rep(1:K, f), n)  
+    #generate indices 1:K and sample n of them  
+    
+    # K fold cross-validated error
+    CV=NULL
+    
+    for (i in 1:K) { 
+      test.index <- seq_len(n)[(s == i)] #test data
+      train.index <- seq_len(n)[(s != i)] #training data
+      
+      #model with training data
+      fit=classifier(model,  data=data[train.index,])
+      #actual test set y
+      actual.labels <- data[test.index, "label"]
+      #predicted test set y
+      predicted.labels=round(as.numeric(predict(fit, data[test.index,])))
+      
+      #actual - predicted on test data
+      error= mean(actual.labels!=predicted.labels)
+      accuracy = 1-error
+      #error rates 
+      CV=c(CV,accuracy)
+    }
+    #Output
+    return(CV)
+  }
+
+```
+
+```{r}
+#CVgeneric_rf (randomForest, trainf,trainl,K=10, seed=123)
+```
+
+```{r}
+#split 2   
+forest.fit2 = randomForest(factor(label) ~ NDAI + SD + CORR + DF +
+                            CF + BF + AF + AN,
+                          data = train.val.data2,
+                          ntree = 160)
+
+label.hat5_2 = predict(forest.fit2, test.data2, type = "prob")
+random.forest.yhat2 = label.hat5_2[,2]
+auc(test.data2$label, label.hat5_2[,2])
+accuracy(cutOff(label.hat5_2[,2]),test.data2$label)
+```
+
+(b) When plotting ROC curves, we choose cutoff values for each method according to the maximum value of the sum of sensitivity and specificity. We choose this point as cutoff value because we want both sensitivity and specificity to be equally weighted when evaluating the ROC curve, rather than weighing one more over the other. By choosing the cutoff point, we can better compare the performance of different methods. 
+
+```{r}
+cv.lm<-CVgeneric_lm (lm, trainf,trainl,K=10, seed=123)
+cv.logit<-CVgeneric_lm (glm, trainf,trainl,K=10, seed=123)
+cv.qda<-CVgeneric_qda (qda, trainf,trainl,K=10, seed=123)
+cv.glm<-rep(0.8607142, length(cv.lm))
+cv.rf<-rep(0.9018668,length(cv.lm))
+```
+
+```{r}
+col1<-c(rep("lm", length(cv.lm)),rep("log", length(cv.lm)),rep("glm", length(cv.lm)),rep("qda", length(cv.lm)), rep("rf", length(cv.lm)))
+col2<-c(cv.lm, cv.logit, cv.glm, cv.qda,cv.rf )
+CVdf<-data.frame(x=col1, y=col2)
+
+ggplot()+geom_boxplot(data=CVdf, aes(x=x, y=y))
+```
+
+In total we used 5 different classification methods or models for 2 ways of splitting the data: Linear Regression, Logistic Regression, Generalized Linear Model, Quadratic Discriminant Analysis, and Random Forest. And we see that for the first way of splitting data, random forest has the highest test accuracy of 91% followed by logistic regression of 88% and QDA of 87%. Linear regression has the lowest test accuracy of 80%, probably due to its misassumptions. For the second way of creating folds, random forest still performs best with an 88% test accuracy followed by QDA of 76% and logistic regression of 71%, while linear regression has the lowest value of 65%.
+
+We also did 10-folds cross validation on the data for both the ways of creating folds, it is clear that random forest gives the highest accuracies across folds whereas linear regression has the lowest accuracies across folds. The other CV-results are shown in the box plots we created for these different models.
+
+**4. Diagnostics**
+
+
+```{r}
+#split 1
+is<-c(10,20,50,70,100,200,300,600,1000)
+accuracies<-c()
+for(i in 1:length(is)){
+  forest.fit = randomForest(factor(label) ~ NDAI + SD + CORR+ DF +
+                            CF + BF + AF + AN,
+                          data = train.val.data,
+                          ntree = is[i])
+  label.hat = predict(forest.fit, test.data, type = "prob")
+  random.forest.yhat = label.hat[,2]
+  accuracy.new<-accuracy(cutOff(label.hat[,2]),test.data$label)
+  accuracies<-c(accuracy.new, accuracies)
+}
+
+accuracies
+```
+```{r}
+#convergence plot for rf
+dfaccur<- data.frame(is, accuracies)
+ggplot(data=dfaccur,aes(x=is, y=accuracies))+geom_point() + stat_smooth()+ ylim(0.8,1) +xlab("number of trees")+ ylab("accuracy")+ ggtitle("Convergence of test accuracies: split 1")
+```
+
+```{r}
+#split 2
+accuracies2<-c()
+for(i in 1:length(is)){
+  forest.fit = randomForest(factor(label) ~ NDAI + SD + CORR+ DF +
+                            CF + BF + AF + AN,
+                          data = train.val.data2,
+                          ntree = is[i])
+  label.hat = predict(forest.fit, test.data2, type = "prob")
+  random.forest.yhat = label.hat[,2]
+  accuracy.new<-accuracy(cutOff(label.hat[,2]),test.data2$label)
+  accuracies2<-c(accuracy.new, accuracies2)
+}
+
+accuracies2
+
+```
+```{r}
+#convergence plot for rf
+dfaccur2<- data.frame(is, accuracies2)
+ggplot(data=dfaccur2,aes(x=is, y=accuracies2))+geom_point() + stat_smooth()+ ylim(0.8,1) +xlab("number of trees")+ ylab("accuracy")+ ggtitle("Convergence of test accuracies: split 2")
+```
+
+```{r}
+is<-c(10,20,50,70,100,200,300,600,1000)
+aucs<-c()
+for(i in 1:length(is)){
+  forest.fit = randomForest(factor(label) ~ NDAI + SD + CORR+ DF +
+                            CF + BF + AF + AN,
+                          data = train.val.data,
+                          ntree = is[i])
+  label.hat = predict(forest.fit, test.data, type = "prob")
+  random.forest.yhat = label.hat[,2]
+  auc.new<-auc(test.data$label, label.hat[,2])
+  aucs<-c(auc.new, aucs)
+}
+
+aucs
+```
+```{r}
+#convergence plot for rf
+dfauc<- data.frame(is, aucs)
+dfauc
+ggplot(data=dfauc,aes(x=is, y=aucs))+geom_point() + stat_smooth()+ ylim(0.9,1) +xlab("number of trees")+ ylab("AUC")+ ggtitle("Convergence of AUCs: split 1")
+```
+
+```{r}
+#split 2
+is<-c(10,20,50,70,100,200,300,600,1000)
+aucs2<-c()
+for(i in 1:length(is)){
+  forest.fit = randomForest(factor(label) ~ NDAI + SD + CORR+ DF +
+                            CF + BF + AF + AN,
+                          data = train.val.data2,
+                          ntree = is[i])
+  label.hat = predict(forest.fit, test.data2, type = "prob")
+  random.forest.yhat = label.hat[,2]
+  auc.new<-auc(test.data2$label, label.hat[,2])
+  aucs2<-c(auc.new, aucs2)
+}
+
+aucs2
+```
+```{r}
+#convergence plot for rf
+dfauc2<- data.frame(is, aucs2)
+dfauc2
+ggplot(data=dfauc2,aes(x=is, y=aucs2))+geom_point() + stat_smooth()+ ylim(0.9,1) +xlab("number of trees")+ ylab("AUC")+ggtitle("Convergence of AUCs: split 2")
+```
+
+
+```{r}
+#Gini Importance 
+varImp(forest.fit)
+varImpPlot(forest.fit,type=2)
+```
+
+
+```{r}
+plot.missclassified = function(img.id = 1, preds = yhat, .train = train,
+                               .test = test, k = 3)
+{
+  # Args: 
+  #   img.id is the id of image, e.g. 1, 2, or 3
+  #   K is the number of partition of an image along each x and y axis
+  # Example:
+  # data = rbind(train, test)
+  # label.hat2 = predict(logreg.fit, data, type = "response")
+  # yhat = cutOff(label.hat2)
+  # plot.missclassified()
+  data = cbind(rbind(.train, .test), preds)
+  blockids = seq((img.id - 1)*k^2 + 1, img.id*k^2)
+  plot1 = ggplot() + 
+    geom_point(data = data[data$blockid %in% blockids, ], 
+               aes(x = x, y = y, 
+                   color = factor(label + preds))) + 
+    scale_color_discrete(guide = guide_legend(
+                                      title = NULL, 
+                                      direction = "horizontal",
+                                      label.position = "bottom",
+                                      label.hjust = 0.5, 
+                                      label.vjust = 0.5,
+                                      label.theme = element_text(angle = 90)), 
+                         label = c("True Not-Cloud","Type I, II Error",
+                                   "True Cloud")) +
+    ggtitle(paste("Classification Error for Image",img.id)) + 
+    theme_bw() +
+    theme(
+       plot.background = element_blank()
+      ,panel.grid.major = element_blank()
+      ,panel.grid.minor = element_blank()
+      ,panel.border = element_blank()
+      ,axis.ticks = element_blank()
+      ,axis.text.x = element_blank()
+      ,axis.text.y = element_blank()
+    ) + 
+    xlab("") + ylab("")
+
+  for (blockid in unique(.train$blockid))
+  {
+    if (blockid %in% blockids)
+    {
+      border = getBorder(blockid)
+      plot1 = plot1 + geom_path(data = border, aes(x = x, y = y ), color = "black")    
+    }
+  }
+  plot1
+}
+```
+
+```{r}
+library(randomForest)
+#split 1
+forest.fit.better = randomForest(factor(label) ~ NDAI + SD + CORR +  AN,
+                          data = train.val.data,
+                          ntree = 160)
+
+label.hat.better = predict(forest.fit.better, test.data, type = "prob")
+random.forest.yhat.better = label.hat.better[,2]
+auc(test.data$label, label.hat.better[,2])
+accuracy( cutOff(label.hat.better[,2]),test.data$label)
+```
+
+
+```{r}
+# ROC curve
+r5.better<-roc(test.data$label,  label.hat.better[,2])
+plot.roc(r5.better, print.thres="best", print.auc = TRUE) 
+title("ROC curve for Modified random forest: split 1")
+```
+
+```{r}
+library(randomForest)
+#split 2
+forest.fit.better2 = randomForest(factor(label) ~ NDAI + SD + CORR +  AN,
+                          data = train.val.data2,
+                          ntree = 160)
+
+label.hat.better2 = predict(forest.fit.better2, test.data2, type = "prob")
+random.forest.yhat.better2 = label.hat.better2[,2]
+auc(test.data2$label, label.hat.better2[,2])
+accuracy( cutOff(label.hat.better2[,2]),test.data2$label)
+```
+
+```{r}
+# ROC curve
+r5.better2<-roc(test.data2$label,  label.hat.better2[,2])
+plot.roc(r5.better2, print.thres="best", print.auc = TRUE)
+title("ROC curve for Modified random forest: split 2")
+```
+
+
+(a)
+
+We know that for a random forest model, when the out-of-bags error stabilizes (i.e. when our solution converges) as more trees are being trained, the training can be stopped before actually training all the trees. From the plot for convergence analysis, we see that the accuracy stays around 88%, which is pretty high. We conclude that the model is quite stable with respect to adding more trees into the training data.
+
+
+
+(b)
+The images below show misclassification errors for model trained on image 1 and 2, and tested on image 3. The other plot show misclassification errors for model trained on image 2 and 3, and tested on image 1.  We see that this model did not perform as well as the k-fold trained one but plotting their misclassification errors helps us see where the model failed. For image 1, false positives are clustered at (x,y) around (150,50) to (200,100). For image 3, false negatives are centered at (x,y) around (50,200) to (250,350). It is clear that the false negative rate is higher than the false positive rate, which indicates that the model misclassifies more absence of clouds
+
+
+
+
+
+
+
+(c)
+Based on 4(a) and 4(b), we want to find a better classifier. We have ran our random forest model using all the features in previous parts. To gather a quantitative measurement of the importance of each feature, we looked at the Gini importance measure, which is calculated by recording the difference between the Gini measure of a random forest's predictions on a fold and the Gini measure with a particular feature's values randomly shuffled. From Figure xxx, it is clear that features with higher mean-decreased Gini values are more important to the model. If a feature were crucial to the forest's trees, then randomly shuffling that feature will drastically decrease its Gini measure. As we can see, NDAI, SD and CORR consistently ranked as the top three in all cross validations. And also AN is the most important radiance feature that we should include in our model.
+
+For future data without expert labels, our model will give a pretty accurate prediction on the presence of clouds and a relatively less accurate prediction on the absence of clouds. As depicted in the graphs above, we have many more false negatives than false positives with large regions sometimes completely misclassified. But in general, the random forest model with these features will do a great job at predicting clouds.
+
+
+(d)
+As we modify the way of splitting the data, the result of the convergence analysis for our random forest model with four features does not change. The plot suggests that the model is still quite stable with the accuracies convergent. Split 1 has an AUC value of 0.968 and an accuracy of 90.5%, whereas Split 2 has an AUC value of 0.955 and an accuracy of 90.9%.  For all the models we have used, the first way of splitting the data gives a higher accuracy and AUC value. However, for our best random forest model with four features, the results for misclassification errors do not change much. The patterns are pretty similar with more false negatives than false positives. We conclude that our model is better in terms of time saving with more representative features.
+
+
+
+
+
+(e)
+Conclusion
+
+Linear regression, Logistic regression, generalized linear model, QDA and random forest all created reasonable predictive models with pretty high AUC values. On average, random forest had the best performance based on the accuracies and the AUC values across the folds. Prediction errors for all these models shared similar shortcomings as seen in the classification error plots. However, we are not sure whether the models are failing for similar reasons. Logistic regression and QDA/LDA have parametric assumptions on the distribution of the classifications, but random forest only assumes no heavy tails. In the absence of significant domain knowledge, coupled with the better ROC performance, we conclude that random forest model gives a better generalization of the data. It also helped confirm the significance of the derived features NDAI, CORR and SD.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
